@@ -3,9 +3,8 @@
 const crypto = require('crypto');
 
 /**
- * Temporary private conversations, held only in memory.
- * A room and everything in it (including message text) is deleted the moment
- * the conversation ends. Room ids and Socket.IO room names are never sent to clients.
+ * Temporary private conversations between two Chat ID users, held only in memory.
+ * Room ids and Socket.IO room names are never sent to clients.
  */
 class RoomManager {
   constructor({ maxMessages = 300 } = {}) {
@@ -13,22 +12,14 @@ class RoomManager {
     this.rooms = new Map();
   }
 
-  /** Random display name such as "Stranger-48291". Not derived from any user data. */
-  static generateAlias() {
-    return `Stranger-${crypto.randomInt(10000, 100000)}`;
-  }
-
-  create(userIdA, userIdB) {
+  create(userA, userB) {
     const id = crypto.randomBytes(16).toString('hex');
-    const aliasA = RoomManager.generateAlias();
-    let aliasB = RoomManager.generateAlias();
-    while (aliasB === aliasA) aliasB = RoomManager.generateAlias();
 
     const room = {
       id,
       name: `room:${id}`, // Socket.IO room name (server-side only)
-      members: [userIdA, userIdB],
-      aliases: { [userIdA]: aliasA, [userIdB]: aliasB },
+      members: [userA.id, userB.id],
+      chatIds: { [userA.id]: userA.chatId, [userB.id]: userB.chatId },
       messages: [],
       nextMessageId: 1,
       reportedBy: new Set(),
@@ -61,7 +52,7 @@ class RoomManager {
     if (!room) return false;
     room.messages.length = 0;
     room.reportedBy.clear();
-    room.aliases = {};
+    room.chatIds = {};
     room.members = [];
     this.rooms.delete(id);
     return true;

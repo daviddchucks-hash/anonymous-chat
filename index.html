@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Anonymous Chat: Permanent Chat ID Identity</title>
+  <meta name="description" content="Chat anonymously using a Chat ID. No registration, no email, no password.">
+  <meta name="color-scheme" content="light dark">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="css/style.css">
+  <script src="js/config.js"></script>
+</head>
+<body class="chat-body">
+  <div class="page">
+    <header class="site-header">
+      <a class="wordmark" href="./">Anonymous Chat</a>
+    </header>
+
+    <div id="banner" class="banner" role="status" hidden></div>
+
+    <main>
+      <!-- 1. Landing / ID Screen -->
+      <section id="screen-identity" class="hero" aria-labelledby="identity-title">
+        <h1 id="identity-title" tabindex="-1">Anonymous Chat</h1>
+        <p class="lead">
+          Connect directly using a permanent anonymous Chat ID. No sign-up, no email, no password, and no personal profile.
+        </p>
+
+        <div class="card id-card">
+          <h2>Your Chat ID</h2>
+          <div class="chat-id-box">
+            <code id="my-chat-id" class="chat-id-display">Generating…</code>
+            <button id="copy-id-btn" class="btn btn-secondary btn-sm" type="button" aria-label="Copy Chat ID">Copy ID</button>
+          </div>
+          <p id="copy-status" class="helper-text" aria-live="polite"></p>
+          <button id="regen-id-btn" class="btn btn-link" type="button">Generate New Chat ID</button>
+        </div>
+
+        <div class="card connect-card">
+          <h2>Chat with someone</h2>
+          <form id="start-chat-form" autocomplete="off">
+            <div class="field-group">
+              <label for="target-chat-id" class="field-label">Enter their Chat ID</label>
+              <input type="text" id="target-chat-id" class="input-field" placeholder="e.g. AC7K-X92P-Q4LM" required pattern="^[A-Za-z0-9]{4}-?[A-Za-z0-9]{4}-?[A-Za-z0-9]{4}$" maxlength="14" spellcheck="false">
+            </div>
+            <p id="start-chat-error" class="form-error" role="alert" hidden></p>
+            <button id="start-chat-btn" class="btn btn-primary" type="submit">Start Chat</button>
+          </form>
+        </div>
+
+        <div class="section">
+          <h2>How it works</h2>
+          <dl class="facts">
+            <div>
+              <dt>No account</dt>
+              <dd>Your Chat ID is your only identity. It is stored locally on your device/browser.</dd>
+            </div>
+            <div>
+              <dt>Private sessions</dt>
+              <dd>Messages are delivered only between you and the user whose Chat ID you connect with.</dd>
+            </div>
+            <div>
+              <dt>No saved messages</dt>
+              <dd>Messages exist in memory during the chat and are wiped when the conversation ends.</dd>
+            </div>
+          </dl>
+        </div>
+
+        <div class="section">
+          <h2>Technical Privacy & Rules</h2>
+          <div class="callout">
+            <strong>Anonymous to users, not untraceable on the network.</strong>
+            <p>
+              Your personal information is never collected or shown to other users. However, standard network metadata (like IP addresses) is processed by hosting servers for abuse protection and rate limiting.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <!-- 2. Active Chat Screen -->
+      <section id="screen-chat" class="screen" hidden>
+        <header class="chat-header">
+          <div class="who">
+            <span class="tag">Chatting with <strong id="peer-id-display">Peer</strong></span>
+            <span class="status"><span id="status-dot" class="dot" data-state="ok"></span><span id="status-text">Connected</span></span>
+          </div>
+          <div class="actions">
+            <button id="report-btn" class="btn btn-sm btn-secondary" type="button">Report</button>
+            <button id="block-btn" class="btn btn-sm btn-secondary" type="button">Block</button>
+            <button id="end-btn" class="btn btn-sm btn-danger" type="button">End Chat</button>
+          </div>
+        </header>
+
+        <div id="messages" class="messages" role="log" aria-live="polite" aria-label="Conversation" tabindex="0"></div>
+        <div id="typing" class="typing" aria-live="polite"></div>
+
+        <form id="composer" class="composer" autocomplete="off">
+          <div class="composer-field">
+            <textarea id="input" rows="1" aria-label="Message" placeholder="Type a message" enterkeyhint="send" maxlength="500"></textarea>
+            <span id="counter" class="counter" hidden></span>
+          </div>
+          <button id="send-btn" class="btn btn-primary" type="submit">Send</button>
+        </form>
+
+        <!-- Ended panel -->
+        <div id="ended-panel" class="ended-panel" hidden>
+          <h2 id="ended-title" tabindex="-1">Conversation ended</h2>
+          <p id="ended-text"></p>
+          <div class="btn-row">
+            <button id="return-identity-btn" class="btn btn-primary" type="button">Back to Main Screen</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Error Screen -->
+      <section id="screen-error" class="screen center-screen" hidden>
+        <h1 id="error-title" tabindex="-1">Connection Problem</h1>
+        <p id="error-text"></p>
+        <button id="error-home-btn" class="btn btn-primary" type="button">Return Home</button>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      Anonymous Chat: Permanent Chat ID identity model. No accounts or saved chat history.
+    </footer>
+  </div>
+
+  <!-- Dialogs -->
+  <dialog id="report-dialog" class="modal" aria-labelledby="report-title">
+    <form id="report-form">
+      <h2 id="report-title">Report user</h2>
+      <p>Send a report regarding this conversation. Your identity is not shared.</p>
+      <div class="reasons" role="radiogroup" aria-label="Reason">
+        <label><input type="radio" name="reason" value="spam" checked> Spam or advertising</label>
+        <label><input type="radio" name="reason" value="harassment"> Harassment or bullying</label>
+        <label><input type="radio" name="reason" value="sexual_content"> Sexual content</label>
+        <label><input type="radio" name="reason" value="hate_speech"> Hate speech</label>
+        <label><input type="radio" name="reason" value="underage"> Under 18</label>
+        <label><input type="radio" name="reason" value="other"> Something else</label>
+      </div>
+      <label class="field-label" for="report-note">Details (optional)</label>
+      <textarea id="report-note" maxlength="200"></textarea>
+      <p id="report-error" class="form-error" role="alert"></p>
+      <div class="btn-row">
+        <button id="report-cancel" class="btn btn-secondary" type="button">Cancel</button>
+        <button id="report-submit" class="btn btn-solid-danger" type="submit">Send report</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="confirm-dialog" class="modal" aria-labelledby="confirm-title">
+    <h2 id="confirm-title">Are you sure?</h2>
+    <p id="confirm-text"></p>
+    <div class="btn-row">
+      <button id="confirm-cancel" class="btn btn-secondary" type="button">Cancel</button>
+      <button id="confirm-ok" class="btn btn-solid-danger" type="button">Confirm</button>
+    </div>
+  </dialog>
+
+  <script src="https://cdn.socket.io/4.8.1/socket.io.min.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

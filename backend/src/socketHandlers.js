@@ -1,9 +1,7 @@
 'use strict';
 
-const { INTERESTS } = require('./config');
-const { MatchQueue } = require('./matching');
 const { RoomManager } = require('./rooms');
-const { UserRegistry } = require('./users');
+const { UserRegistry, isValidChatId } = require('./users');
 const { RateLimiter, ConnectionLimiter } = require('./rateLimiter');
 const {
   hashIp,
@@ -29,12 +27,6 @@ const reply = (ack, body) => {
   if (typeof ack === 'function') ack(body);
 };
 
-/**
- * Work out the client IP for rate limits and bans. `hops` is the number of
- * trusted reverse proxies (same meaning as Express "trust proxy" = N): the
- * client address is the Nth entry from the right of X-Forwarded-For.
- * The raw value is hashed immediately and never stored, sent or logged.
- */
 function getClientIp(handshake, hops) {
   if (hops > 0) {
     const list = String((handshake.headers && handshake.headers['x-forwarded-for']) || '')
@@ -46,13 +38,8 @@ function getClientIp(handshake, hops) {
   return handshake.address || 'unknown';
 }
 
-/**
- * Wire all chat behaviour onto a Socket.IO server (or a compatible fake in tests).
- * @returns {{stats: () => object, close: () => void}}
- */
 function registerSocketHandlers(io, { config, moderation }) {
   const users = new UserRegistry();
-  const queue = new MatchQueue();
   const rooms = new RoomManager({ maxMessages: config.maxRoomMessages });
   const checkText = buildTextChecker(config.blockedWords);
   const strikes = new StrikeTracker({ windowMs: config.strikeWindowMs });
@@ -61,7 +48,7 @@ function registerSocketHandlers(io, { config, moderation }) {
     event: new RateLimiter({ windowMs: config.eventRateWindowMs, max: config.eventRateMax }),
     message: new RateLimiter({ windowMs: config.messageRateWindowMs, max: config.messageRateMax }),
     typing: new RateLimiter({ windowMs: config.typingRateWindowMs, max: config.typingRateMax }),
-    find: new RateLimiter({ windowMs: config.findRateWindowMs, max: config.findRateMax }),
+    startChat: new RateLimiter({ windowMs: config.findRateWindowMs, max: config.findRateMax }),
     report: new RateLimiter({ windowMs: config.reportRateWindowMs, max: config.reportRateMax }),
   };
 
@@ -81,58 +68,36 @@ function registerSocketHandlers(io, { config, moderation }) {
     self: message.senderId === viewerId,
   });
 
-  const sharedInterest = (a, b) => (a.interest === b.interest && a.interest !== 'random' ? a.interest : null);
-
   function clearTimers(user) {
     if (user.graceTimer) clearTimeout(user.graceTimer);
-    if (user.waitTimer) clearTimeout(user.waitTimer);
     user.graceTimer = null;
-    user.waitTimer = null;
   }
 
-  function leaveQueue(user) {
-    queue.remove(user.id);
-    if (user.waitTimer) clearTimeout(user.waitTimer);
-    user.waitTimer = null;
-    if (user.state === 'waiting') user.state = 'idle';
-  }
-
-  /** May these two users be paired? (interest rules live in the queue itself) */
-  function canPair(a, b, now = Date.now()) {
-    if (!a || !b || a.id === b.id || a.sid === b.sid) return false;
-    if (a.blockedIds.has(b.id) || b.blockedIds.has(a.id)) return false;
+  function canChat(a, b) {
+    if (!a || !b || a.id === b.id || a.chatId === b.chatId) return false;
+    if (a.blockedChatIds.has(b.chatId) || b.blockedChatIds.has(a.chatId)) return false;
     if (a.blockedIps.has(b.ipHash) || b.blockedIps.has(a.ipHash)) return false;
-    if (!config.allowSameIpMatch && a.ipHash === b.ipHash) return false;
-    const cooldown = a.recentPartners.get(b.id);
-    if (cooldown && cooldown > now) return false;
-    if (cooldown) a.recentPartners.delete(b.id);
     return true;
   }
 
   /* --------------------------- conversation lifecycle ------------------------ */
 
-  function createMatch(a, b) {
-    leaveQueue(a);
-    leaveQueue(b);
-    const room = rooms.create(a.id, b.id);
-    const now = Date.now();
+  function startChatSession(a, b) {
+    const room = rooms.create(a, b);
     for (const [user, other] of [[a, b], [b, a]]) {
       user.state = 'chatting';
       user.roomId = room.id;
-      user.recentPartners.set(other.id, now + config.rematchCooldownMs);
       if (user.online && user.socket) user.socket.join(room.name);
     }
     for (const [user, other] of [[a, b], [b, a]]) {
-      emitTo(user, 'match_found', {
-        you: room.aliases[user.id],
-        stranger: room.aliases[other.id],
-        interest: sharedInterest(a, b),
+      emitTo(user, 'chat_started', {
+        peerChatId: other.chatId,
         maxMessageLength: config.maxMessageLength,
       });
     }
+    return room;
   }
 
-  /** End a conversation for everyone in it and destroy the room and its messages. */
   function endRoom(room, initiatorId, reasonForOthers) {
     for (const id of [...room.members]) {
       const user = users.getById(id);
@@ -147,10 +112,8 @@ function registerSocketHandlers(io, { config, moderation }) {
     rooms.destroy(room.id);
   }
 
-  /** Forget a user completely (grace period over, or removed for abuse). Idempotent. */
   function finalizeUser(user, reasonForPartner = 'partner_disconnected') {
     if (!users.getById(user.id)) return;
-    leaveQueue(user);
     clearTimers(user);
     const room = rooms.get(user.roomId);
     if (room) endRoom(room, user.id, reasonForPartner);
@@ -160,7 +123,6 @@ function registerSocketHandlers(io, { config, moderation }) {
     users.remove(user);
   }
 
-  /** Disconnect an abusive client right away. */
   function forceRemove(user, code) {
     const socket = user.socket;
     user.socket = null;
@@ -172,10 +134,6 @@ function registerSocketHandlers(io, { config, moderation }) {
     if (socket) socket.disconnect(true);
   }
 
-  /**
-   * Add abuse strikes. When the total inside the window reaches the limit the
-   * client is banned (by hashed IP) and disconnected. Returns true if removed.
-   */
   function punish(user, weight) {
     const total = strikes.add(user.id, weight);
     if (total >= config.strikeLimit) {
@@ -186,68 +144,75 @@ function registerSocketHandlers(io, { config, moderation }) {
     return false;
   }
 
-  /* -------------------------------- matching -------------------------------- */
+  /* ------------------------------- chat ID handlers -------------------------- */
 
-  function startInterestTimer(user) {
-    if (user.waitTimer) clearTimeout(user.waitTimer);
-    user.waitTimer = null;
-    if (user.anyone) return;
-    user.waitTimer = setTimeout(() => {
-      user.waitTimer = null;
-      if (user.state === 'waiting' && !user.anyone) {
-        emitTo(user, 'no_interest_match', { interest: user.interest });
-      }
-    }, config.interestMatchTimeoutMs);
-    if (user.waitTimer.unref) user.waitTimer.unref();
-  }
-
-  function handleFind(user, payload, ack) {
-    if (!isObject(payload) || typeof payload.interest !== 'string') {
+  function handleStartChatId(user, payload, ack) {
+    if (!isObject(payload) || typeof payload.targetChatId !== 'string') {
       reply(ack, { ok: false, error: 'invalid_payload' });
       punish(user, 1);
       return;
     }
-    const interest = payload.interest.trim().toLowerCase();
-    if (!INTERESTS.includes(interest)) {
-      reply(ack, { ok: false, error: 'invalid_interest' });
-      punish(user, 1);
+
+    const targetChatId = payload.targetChatId.trim().toUpperCase();
+    if (!isValidChatId(targetChatId)) {
+      reply(ack, { ok: false, error: 'invalid_chat_id' });
       return;
     }
+
+    if (user.chatId === targetChatId) {
+      reply(ack, { ok: false, error: 'cannot_chat_self' });
+      return;
+    }
+
     if (user.state === 'chatting') {
       reply(ack, { ok: false, error: 'already_in_chat' });
       return;
     }
-    if (!limiters.find.consume(user.id).allowed) {
+
+    if (!limiters.startChat.consume(user.id).allowed) {
       reply(ack, { ok: false, error: 'rate_limited' });
       punish(user, 0.5);
       return;
     }
 
-    const anyone = interest === 'random' || payload.anyone === true;
-    const previous = queue.get(user.id);
-    const since = previous && previous.interest === interest ? previous.since : Date.now();
-
-    leaveQueue(user);
-    user.interest = interest;
-    user.anyone = anyone;
-    user.state = 'waiting';
-
-    const entry = { userId: user.id, interest, anyone, since };
-    const partnerEntry = queue.enqueueOrMatch(entry, (other) => canPair(user, users.getById(other.userId)));
-    const partner = partnerEntry ? users.getById(partnerEntry.userId) : null;
-
-    if (partner) {
-      reply(ack, { ok: true, status: 'matched' });
-      createMatch(user, partner);
-    } else {
-      reply(ack, { ok: true, status: 'waiting' });
-      startInterestTimer(user);
+    const targetUser = users.getByChatId(targetChatId);
+    if (!targetUser) {
+      reply(ack, { ok: false, error: 'chat_id_not_found' });
+      return;
     }
+
+    if (targetUser.state === 'chatting') {
+      reply(ack, { ok: false, error: 'user_busy' });
+      return;
+    }
+
+    if (!canChat(user, targetUser)) {
+      reply(ack, { ok: false, error: 'chat_id_not_found' });
+      return;
+    }
+
+    startChatSession(user, targetUser);
+    reply(ack, { ok: true, peerChatId: targetUser.chatId });
   }
 
-  function handleCancel(user, _payload, ack) {
-    if (user.state === 'waiting') leaveQueue(user);
-    reply(ack, { ok: true });
+  function handleGenerateNewChatId(user, _payload, ack) {
+    if (user.state === 'chatting') {
+      const room = getActiveRoom(user);
+      if (room) endRoom(room, user.id, 'partner_ended');
+    }
+
+    users.byChatId.delete(user.chatId);
+    let newChatId = require('./users').generateChatId();
+    while (users.byChatId.has(newChatId)) {
+      newChatId = require('./users').generateChatId();
+    }
+    user.chatId = newChatId;
+    users.byChatId.set(user.chatId, user);
+
+    reply(ack, { ok: true, chatId: user.chatId });
+    if (user.online && user.socket) {
+      user.socket.emit('identity_updated', { chatId: user.chatId, sid: user.sid });
+    }
   }
 
   /* -------------------------------- messaging ------------------------------- */
@@ -277,7 +242,6 @@ function registerSocketHandlers(io, { config, moderation }) {
     if (check.severe) return fail('blocked_content', 3);
     text = check.text;
 
-    // Simple duplicate-spam detection: the same text 3 times within 20 seconds.
     const now = Date.now();
     const key = text.toLowerCase();
     user.recentTexts = user.recentTexts.filter((r) => now - r.ts < 20000);
@@ -293,7 +257,7 @@ function registerSocketHandlers(io, { config, moderation }) {
   }
 
   function relayTyping(user, event) {
-    if (!limiters.typing.consume(user.id).allowed) return; // silently drop typing spam
+    if (!limiters.typing.consume(user.id).allowed) return;
     const room = getActiveRoom(user);
     if (!room) return;
     emitTo(partnerOf(room, user), event, {});
@@ -339,7 +303,7 @@ function registerSocketHandlers(io, { config, moderation }) {
       note,
       reportedRef: partner.ipHash,
       reporterRef: user.ipHash,
-      alias: room.aliases[partner.id],
+      alias: partner.chatId,
       conversationAgeSec: Math.round((Date.now() - room.createdAt) / 1000),
       messageCount: room.messages.length,
       context,
@@ -356,11 +320,9 @@ function registerSocketHandlers(io, { config, moderation }) {
     if (!room) return reply(ack, { ok: false, error: 'not_in_chat' });
     const partner = partnerOf(room, user);
     if (partner) {
-      user.blockedIds.add(partner.id);
+      user.blockedChatIds.add(partner.chatId);
       if (partner.ipHash !== user.ipHash) user.blockedIps.add(partner.ipHash);
     }
-    // Ack first so the client knows this end was a block before `chat_ended` arrives.
-    // The other person only sees that the stranger left; they are never told they were blocked.
     reply(ack, { ok: true });
     endRoom(room, user.id, 'partner_ended');
     return undefined;
@@ -390,9 +352,20 @@ function registerSocketHandlers(io, { config, moderation }) {
     }
     socket.on('disconnect', () => connections.release(ipHash));
 
-    // Resume an existing session (refresh / network drop) or start a new one.
-    const sid = socket.handshake.auth && socket.handshake.auth.sid;
-    const user = users.getBySid(sid) || users.create({ ipHash });
+    const auth = socket.handshake.auth || {};
+    const sid = auth.sid;
+    const requestedChatId = typeof auth.chatId === 'string' ? auth.chatId.trim().toUpperCase() : null;
+
+    let user = users.getBySid(sid);
+    if (!user) {
+      user = users.create({ ipHash, requestedChatId });
+    } else if (requestedChatId && isValidChatId(requestedChatId) && user.chatId !== requestedChatId) {
+      if (!users.getByChatId(requestedChatId)) {
+        users.byChatId.delete(user.chatId);
+        user.chatId = requestedChatId;
+        users.byChatId.set(user.chatId, user);
+      }
+    }
     user.ipHash = ipHash;
 
     if (user.socket && user.socket !== socket) {
@@ -406,25 +379,23 @@ function registerSocketHandlers(io, { config, moderation }) {
     user.socket = socket;
     user.online = true;
 
-    // Global per-connection flood guard.
     socket.use((packet, next) => {
       if (limiters.event.consume(user.id).allowed) return next();
       socket.emit('connection_error', { code: 'rate_limited', message: ERROR_MESSAGES.rate_limited });
       punish(user, 1);
-      return undefined; // packet dropped
+      return undefined;
     });
 
     const on = (event, handler) => {
       socket.on(event, (payload, ack) => {
-        if (user.socket !== socket) return; // stale socket
+        if (user.socket !== socket) return;
         if (typeof payload === 'function') {
-          ack = payload; // eslint-disable-line no-param-reassign
-          payload = undefined; // eslint-disable-line no-param-reassign
+          ack = payload;
+          payload = undefined;
         }
         try {
           handler(user, payload, ack);
         } catch (err) {
-          // Never log payloads: they can contain message text.
           console.error(`[socket] handler "${event}" failed: ${err && err.message}`);
           reply(ack, { ok: false, error: 'server_error' });
           socket.emit('connection_error', { code: 'server_error', message: ERROR_MESSAGES.server_error });
@@ -432,8 +403,8 @@ function registerSocketHandlers(io, { config, moderation }) {
       });
     };
 
-    on('find_stranger', handleFind);
-    on('cancel_matching', handleCancel);
+    on('start_chat_id', handleStartChatId);
+    on('generate_new_chat_id', handleGenerateNewChatId);
     on('send_message', handleSend);
     on('typing_start', (u) => relayTyping(u, 'typing_start'));
     on('typing_stop', (u) => relayTyping(u, 'typing_stop'));
@@ -442,10 +413,9 @@ function registerSocketHandlers(io, { config, moderation }) {
     on('block_user', handleBlock);
 
     socket.on('disconnect', () => {
-      if (user.socket !== socket) return; // replaced by a newer socket, or removed
+      if (user.socket !== socket) return;
       user.socket = null;
       user.online = false;
-      leaveQueue(user); // never keep an offline user in the waiting queue
 
       const room = getActiveRoom(user);
       if (room) {
@@ -453,28 +423,25 @@ function registerSocketHandlers(io, { config, moderation }) {
         emitTo(partner, 'typing_stop', {});
         emitTo(partner, 'partner_status', { online: false });
       }
-      // Give refreshes and network blips a short window to come back.
       if (user.graceTimer) clearTimeout(user.graceTimer);
       user.graceTimer = setTimeout(() => finalizeUser(user, 'partner_disconnected'), config.reconnectGraceMs);
       if (user.graceTimer.unref) user.graceTimer.unref();
     });
 
-    // Tell this tab who it is and what state it is in.
     const room = getActiveRoom(user);
     let chat = null;
     if (room) {
       socket.join(room.name);
       const partner = partnerOf(room, user);
       chat = {
-        you: room.aliases[user.id],
-        stranger: room.aliases[partner.id],
-        interest: sharedInterest(user, partner),
+        peerChatId: partner.chatId,
         partnerOnline: !!(partner && partner.online),
         messages: room.messages.map((m) => toClientMessage(m, user.id)),
       };
       emitTo(partner, 'partner_status', { online: true });
     }
     socket.emit('session', {
+      chatId: user.chatId,
       sid: user.sid,
       state: room ? 'chatting' : 'idle',
       limits: { maxMessageLength: config.maxMessageLength },
@@ -492,7 +459,7 @@ function registerSocketHandlers(io, { config, moderation }) {
   if (sweeper.unref) sweeper.unref();
 
   return {
-    stats: () => ({ users: users.size, waiting: queue.size, rooms: rooms.size }),
+    stats: () => ({ users: users.size, rooms: rooms.size }),
     close: () => {
       clearInterval(sweeper);
       for (const user of [...users.byId.values()]) {

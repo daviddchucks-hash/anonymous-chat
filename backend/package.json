@@ -9,11 +9,11 @@
     "node": ">=18.17"
   },
   "scripts": {
-    "start": "node backend/server.js",
-    "dev": "node --watch backend/server.js",
-    "test": "node --test backend/test/unit.test.js backend/test/flow.test.js",
-    "test:integration": "node --test backend/test/integration.test.js",
-    "test:all": "node --test backend/test/unit.test.js backend/test/flow.test.js backend/test/integration.test.js"
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node --test test/unit.test.js test/flow.test.js",
+    "test:integration": "node --test test/integration.test.js",
+    "test:all": "node --test test/unit.test.js test/flow.test.js test/integration.test.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
