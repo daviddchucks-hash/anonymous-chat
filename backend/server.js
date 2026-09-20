@@ -143,7 +143,7 @@ function createServer(env = process.env) {
 function start() {
   const { server, config, close } = createServer();
 
-  server.listen(config.port, () => {
+  server.listen(config.port, '0.0.0.0', () => {
     console.log(`Passerby listening on port ${config.port} (${config.env})`);
     if (config.isProd && !process.env.IP_HASH_SECRET) {
       console.warn('IP_HASH_SECRET is not set: a random one is used, so bans reset on every restart.');
@@ -168,4 +168,4 @@ function start() {
 
 if (require.main === module) start();
 
-module.exports = { createServer };
+module.exports = { createServer, start };

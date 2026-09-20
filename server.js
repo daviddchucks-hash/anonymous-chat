@@ -1,4 +1,9 @@
 'use strict';
 
-// Proxy entrypoint for root directory so 'node server.js' on Render works seamlessly
-module.exports = require('./backend/server.js');
+const { start, createServer } = require('./backend/server.js');
+
+if (require.main === module) {
+  start();
+}
+
+module.exports = { start, createServer };
