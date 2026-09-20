@@ -1,0 +1,29 @@
+{
+  "name": "anonymous-chat",
+  "version": "1.0.0",
+  "description": "Passerby: anonymous real-time stranger chat (Express + Socket.IO, in-memory only, no database)",
+  "main": "server.js",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.17"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node --test test/unit.test.js test/flow.test.js",
+    "test:integration": "node --test test/integration.test.js",
+    "test:all": "node --test test/unit.test.js test/flow.test.js test/integration.test.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "helmet": "^8.0.0",
+    "socket.io": "^4.8.1"
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.8.1"
+  }
+}

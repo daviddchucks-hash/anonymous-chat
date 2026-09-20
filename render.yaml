@@ -1,0 +1,24 @@
+# Render Blueprint: https://render.com/docs/blueprint-spec
+# Run exactly ONE instance: chats live in that process's memory.
+services:
+  - type: web
+    name: passerby-anonymous-chat
+    runtime: node
+    # "free" spins down when idle, which drops every active chat. Use "starter" or higher for real use.
+    plan: free
+    # Once you have committed a package-lock.json you can switch this to: npm ci --omit=dev
+    buildCommand: npm install --omit=dev
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: "20"
+      - key: TRUST_PROXY
+        value: "1"
+      - key: IP_HASH_SECRET
+        generateValue: true
+      # Optional: uncomment to enable the read-only moderation API (24+ chars).
+      # - key: ADMIN_TOKEN
+      #   sync: false
