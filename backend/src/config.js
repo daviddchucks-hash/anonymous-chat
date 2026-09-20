@@ -46,7 +46,10 @@ function loadConfig(env = process.env) {
     port: toInt(env.PORT, 3000, 0, 65535),
 
     // Security / network
-    corsOrigins: toList(env.CORS_ORIGINS).map((o) => o.replace(/\/+$/, '')),
+    corsOrigins: Array.from(new Set([
+      ...toList(env.CORS_ORIGINS).map((o) => o.replace(/\/+$/, '')),
+      'https://daviddchucks-hash.github.io',
+    ])),
     trustProxy: toInt(env.TRUST_PROXY, isProd ? 1 : 0, 0, 10),
     ipHashSecret: env.IP_HASH_SECRET || crypto.randomBytes(32).toString('hex'),
     adminToken: env.ADMIN_TOKEN && env.ADMIN_TOKEN.length >= 24 ? env.ADMIN_TOKEN : '',
