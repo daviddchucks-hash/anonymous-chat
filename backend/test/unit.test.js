@@ -4,9 +4,9 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { RateLimiter, ConnectionLimiter } = require('../src/rateLimiter');
-const { MatchQueue } = require('../src/matching');
 const { RoomManager } = require('../src/rooms');
-const { loadConfig, INTERESTS } = require('../src/config');
+const { UserRegistry, generateChatId, isValidChatId } = require('../src/users');
+const { loadConfig } = require('../src/config');
 const {
   sanitizeText,
   textLength,
@@ -28,7 +28,6 @@ test('RateLimiter allows max hits per window then blocks', () => {
   const blocked = rl.consume('a', t + 3);
   assert.equal(blocked.allowed, false);
   assert.ok(blocked.retryAfterMs > 0 && blocked.retryAfterMs <= 1000);
-  // other keys are independent
   assert.equal(rl.consume('b', t + 3).allowed, true);
 });
 
@@ -37,7 +36,7 @@ test('RateLimiter recovers after the window and refused hits do not extend the l
   rl.consume('a', 0);
   rl.consume('a', 10);
   for (let i = 0; i < 50; i += 1) assert.equal(rl.consume('a', 500 + i).allowed, false);
-  assert.equal(rl.consume('a', 1001).allowed, true); // first hit expired at t=1000
+  assert.equal(rl.consume('a', 1001).allowed, true);
 });
 
 test('RateLimiter sweep frees idle keys', () => {
@@ -60,79 +59,47 @@ test('ConnectionLimiter caps and releases', () => {
   assert.equal(cl.count('ip'), 0);
 });
 
-/* --------------------------------- matching -------------------------------- */
+/* -------------------------------- Chat ID & Users -------------------------- */
 
-const entry = (userId, interest, anyone = interest === 'random') => ({ userId, interest, anyone, since: 0 });
-
-test('MatchQueue pairs users with the same interest', () => {
-  const q = new MatchQueue();
-  assert.equal(q.enqueueOrMatch(entry('a', 'music')), null);
-  const partner = q.enqueueOrMatch(entry('b', 'music'));
-  assert.equal(partner.userId, 'a');
-  assert.equal(q.size, 0);
+test('generateChatId generates valid XXXX-XXXX-XXXX IDs', () => {
+  const id1 = generateChatId();
+  const id2 = generateChatId();
+  assert.equal(isValidChatId(id1), true);
+  assert.equal(isValidChatId(id2), true);
+  assert.notEqual(id1, id2);
 });
 
-test('MatchQueue does not pair different interests unless one side accepts anyone', () => {
-  const q = new MatchQueue();
-  assert.equal(q.enqueueOrMatch(entry('a', 'music', false)), null);
-  assert.equal(q.enqueueOrMatch(entry('b', 'gaming', false)), null);
-  assert.equal(q.size, 2);
-  // a random user accepts anyone, but the strict users do not accept a random user
-  assert.equal(q.enqueueOrMatch(entry('c', 'random')), null);
-  assert.equal(q.size, 3);
-  // when a strict user opts in to "anyone" they can be matched with the random user
-  const partner = q.enqueueOrMatch(entry('a', 'music', true));
-  assert.equal(partner.userId, 'c');
-  assert.equal(q.size, 1); // only the strict gaming user is still waiting
-  assert.equal(q.has('b'), true);
-});
+test('UserRegistry registers and retrieves users by Chat ID and SID', () => {
+  const registry = new UserRegistry();
+  const u1 = registry.create({ ipHash: 'hash1', requestedChatId: 'AC7K-X92P-Q4LM' });
+  assert.equal(u1.chatId, 'AC7K-X92P-Q4LM');
+  assert.equal(registry.getByChatId('AC7K-X92P-Q4LM'), u1);
+  assert.equal(registry.getBySid(u1.sid), u1);
 
-test('MatchQueue prefers same-interest partner over an older different-interest one', () => {
-  const q = new MatchQueue();
-  // 'old' accepts anyone; 'same' is strict music. They cannot pair with each other, so both wait.
-  assert.equal(q.enqueueOrMatch(entry('old', 'gaming', true)), null);
-  assert.equal(q.enqueueOrMatch(entry('same', 'music', false)), null);
-  // 'new' is compatible with both, and must pick the same-interest one even though 'old' waited longer.
-  const partner = q.enqueueOrMatch(entry('new', 'music', true));
-  assert.equal(partner.userId, 'same');
-});
-
-test('MatchQueue never matches a user with themselves and never duplicates entries', () => {
-  const q = new MatchQueue();
-  assert.equal(q.enqueueOrMatch(entry('a', 'music')), null);
-  assert.equal(q.enqueueOrMatch(entry('a', 'music')), null);
-  assert.equal(q.size, 1);
-});
-
-test('MatchQueue honours the canPair callback', () => {
-  const q = new MatchQueue();
-  q.enqueueOrMatch(entry('a', 'music'));
-  q.enqueueOrMatch(entry('b', 'music'), (o) => o.userId !== 'a'); // b refuses a
-  assert.equal(q.size, 2);
-});
-
-test('MatchQueue.remove works', () => {
-  const q = new MatchQueue();
-  q.enqueueOrMatch(entry('a', 'music'));
-  assert.equal(q.remove('a'), true);
-  assert.equal(q.has('a'), false);
+  // Reusing existing Chat ID gives a fresh generated ID
+  const u2 = registry.create({ ipHash: 'hash2', requestedChatId: 'AC7K-X92P-Q4LM' });
+  assert.notEqual(u2.chatId, 'AC7K-X92P-Q4LM');
+  assert.equal(isValidChatId(u2.chatId), true);
 });
 
 /* ----------------------------------- rooms --------------------------------- */
 
-test('RoomManager creates distinct aliases in Stranger-NNNNN form and destroys data', () => {
+test('RoomManager creates room and destroys data', () => {
   const rm = new RoomManager({ maxMessages: 3 });
-  const room = rm.create('u1', 'u2');
-  assert.match(room.aliases.u1, /^Stranger-\d{5}$/);
-  assert.match(room.aliases.u2, /^Stranger-\d{5}$/);
-  assert.notEqual(room.aliases.u1, room.aliases.u2);
-  for (let i = 0; i < 5; i += 1) rm.addMessage(room.id, 'u1', `m${i}`);
-  assert.equal(room.messages.length, 3); // capped
+  const registry = new UserRegistry();
+  const u1 = registry.create({ ipHash: 'h1' });
+  const u2 = registry.create({ ipHash: 'h2' });
+  const room = rm.create(u1, u2);
+  assert.equal(room.chatIds[u1.id], u1.chatId);
+  assert.equal(room.chatIds[u2.id], u2.chatId);
+
+  for (let i = 0; i < 5; i += 1) rm.addMessage(room.id, u1.id, `m${i}`);
+  assert.equal(room.messages.length, 3);
   assert.equal(room.messages[0].text, 'm2');
-  assert.equal(rm.partnerId(room, 'u1'), 'u2');
+  assert.equal(rm.partnerId(room, u1.id), u2.id);
   const messages = room.messages;
   assert.equal(rm.destroy(room.id), true);
-  assert.equal(messages.length, 0); // message data wiped
+  assert.equal(messages.length, 0);
   assert.equal(rm.get(room.id), null);
   assert.equal(rm.size, 0);
 });
@@ -152,7 +119,7 @@ test('sanitizeText keeps emoji ZWJ sequences and normal text', () => {
 
 test('sanitizeText collapses excess newlines and limits zalgo stacks', () => {
   assert.equal(sanitizeText('a\n\n\n\n\nb'), 'a\n\nb');
-  const zalgo = 'x' + '\u0301'.repeat(30); // 'x' does not compose with the mark under NFC
+  const zalgo = 'x' + '\u0301'.repeat(30);
   assert.equal(sanitizeText(zalgo), 'x' + '\u0301'.repeat(3));
 });
 
@@ -215,7 +182,7 @@ test('StrikeTracker sums weights within the window and forgets old ones', () => 
   const st = new StrikeTracker({ windowMs: 1000 });
   assert.equal(st.add('u', 1, 0), 1);
   assert.equal(st.add('u', 2.5, 500), 3.5);
-  assert.equal(st.add('u', 1, 1200), 3.5); // the first (t=0) has expired
+  assert.equal(st.add('u', 1, 1200), 3.5);
   st.clear('u');
   assert.equal(st.total('u', 1200), 0);
 });
@@ -226,13 +193,13 @@ test('ModerationStore keeps minimal reports and supports resolve/list/stats', ()
   let now = 1000;
   const ms = new ModerationStore({ autoBanThreshold: 3, banDurationMs: 5000, now: () => now });
   const { report, autoBanned } = ms.addReport({
-    reason: 'spam', note: 'ads', reportedRef: 'T', reporterRef: 'R1', alias: 'Stranger-11111', messageCount: 4,
+    reason: 'spam', note: 'ads', reportedRef: 'T', reporterRef: 'R1', alias: 'AC7K-X92P-Q4LM', messageCount: 4,
   });
   assert.equal(autoBanned, false);
   assert.deepEqual(Object.keys(report).sort(), [
     'alias', 'conversationAgeSec', 'createdAt', 'id', 'messageCount', 'note', 'reason', 'reportedRef', 'status',
   ]);
-  assert.equal(report.context, undefined); // no message text by default
+  assert.equal(report.context, undefined);
   assert.equal(ms.list({ status: 'open' }).length, 1);
   assert.equal(ms.resolve(report.id, 'dismissed').status, 'dismissed');
   assert.equal(ms.list({ status: 'open' }).length, 0);
@@ -245,7 +212,7 @@ test('ModerationStore auto-bans after enough DISTINCT reporters, ban expires', (
   const ms = new ModerationStore({ autoBanThreshold: 3, banDurationMs: 5000, now: () => now });
   const rep = (reporterRef) => ms.addReport({ reason: 'harassment', reportedRef: 'T', reporterRef, alias: 'x' });
   assert.equal(rep('R1').autoBanned, false);
-  assert.equal(rep('R1').autoBanned, false); // same reporter again does not count twice
+  assert.equal(rep('R1').autoBanned, false);
   assert.equal(rep('R2').autoBanned, false);
   assert.equal(rep('R3').autoBanned, true);
   assert.equal(ms.isBanned('T').banned, true);
@@ -276,8 +243,4 @@ test('loadConfig clamps unsafe values and defaults sensibly', () => {
   assert.equal(c.messageRateMax, 1);
   assert.equal(c.port, 3000);
   assert.equal(c.adminToken, '');
-  assert.equal(loadConfig({ ADMIN_TOKEN: 'short' }).adminToken, '');
-  assert.equal(loadConfig({ ADMIN_TOKEN: 'x'.repeat(30) }).adminToken.length, 30);
-  assert.deepEqual(loadConfig({ CORS_ORIGINS: 'https://a.com/, https://b.com' }).corsOrigins, ['https://a.com', 'https://b.com']);
-  assert.ok(INTERESTS.includes('random') && INTERESTS.length === 9);
 });

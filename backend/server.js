@@ -109,7 +109,7 @@ function createServer(env = process.env) {
   }
 
   app.use(
-    express.static(path.join(__dirname, 'public'), {
+    express.static(path.join(__dirname, '..'), {
       maxAge: config.isProd ? '1h' : 0,
       setHeaders: (res, filePath) => {
         if (filePath.endsWith('.html')) res.setHeader('Cache-Control', 'no-cache');
